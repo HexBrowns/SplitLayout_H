@@ -1,6 +1,6 @@
 # SplitLayout_H（分割レイアウト）開発メモ
 
-使い方は `自作スクリプトマニュアル/SplitLayout_H_Manual.md`、設計は `AI/specifications/20261010_SplitLayout_H_spec.md`。
+使い方は `AI/公開情報/SplitLayout_H/SplitLayout_H_Manual.md`、設計は `AI/specifications/20261010_SplitLayout_H_spec.md`。
 前提になる本体の窓の作りは `.claude/rules/au2-plugin-checklist.md`「本体の窓の構成」。
 
 ## ビルドと配置
