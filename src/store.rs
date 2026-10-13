@@ -69,11 +69,13 @@ pub struct Store {
     pub saved: Vec<Named>,
     /// 鍵ごとの、本体の分離の窓の位置（x, y, 幅, 高さ）。題の変わる窓を次の起動で見分ける（`ident`）
     pub rects: std::collections::BTreeMap<String, [i32; 4]>,
+    /// プラグインの窓の中の窓の手掛かり（`host::fingerprint`）→ 鍵。言語で題が訳されても同じタブとして見分ける（`ident`。v0.3.5 で足した）
+    pub fps: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Store {
     fn default() -> Self {
-        Self { version: VERSION, current: LayoutSet::default(), saved: Vec::new(), rects: Default::default() }
+        Self { version: VERSION, current: LayoutSet::default(), saved: Vec::new(), rects: Default::default(), fps: Default::default() }
     }
 }
 

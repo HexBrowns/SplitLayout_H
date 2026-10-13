@@ -218,6 +218,47 @@ impl Harness {
         }
     }
 
+    /// プラグインの窓（中の窓の題を `inner` にする。手掛かりは「Static|<inner>」）
+    fn add_plugin(&mut self, title: &str, inner: &str, i: i32) -> HWND {
+        unsafe {
+            let instance = GetModuleHandleW(None).unwrap();
+            let t = wide(title);
+            let p = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("aviutl2Manager"),
+                PCWSTR(t.as_ptr()),
+                WS_OVERLAPPEDWINDOW,
+                ORIGIN + 100 + i * 30,
+                ORIGIN + 100 + i * 20,
+                400 + i,
+                300 + i,
+                Some(self.main),
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap();
+            let inner = wide(inner);
+            let _ = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                PCWSTR(inner.as_ptr()),
+                WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                100,
+                100,
+                Some(p),
+                None,
+                Some(instance.into()),
+                None,
+            );
+            let _ = ShowWindow(p, SW_SHOWNA);
+            self.panels.push((title.to_string(), p));
+            p
+        }
+    }
+
     fn panel(&self, title: &str) -> HWND {
         self.panels.iter().find(|p| p.0 == title).map(|p| p.1).unwrap_or_else(|| panic!("パネル {title} が無い"))
     }
@@ -552,6 +593,74 @@ fn s_close_cancel_and_restart() {
     assert_ok("次の起動");
 }
 
+/// 題が変わるプラグインの窓（本体が言語ファイルで分離の窓の題を訳す）。2026-10-13 に本番で、英語で起動した回に
+/// 「色空間ピッカー」が「Color Space Picker」という別のタブになり、日本語に戻すと、その灰色のタブが前に出たまま
+/// 本物の窓が裏に回って見えなくなった
+fn s_renamed_plugin_window() {
+    let pane_of = |tabs: &[&str]| {
+        let mut n = Node::default();
+        for t in tabs {
+            n.insert(Target::Root, t, Dock::Center);
+        }
+        n
+    };
+    let key_of = |p: HWND| with_app(|a| a.embedded.get(&raw(p)).map(|e| e.key.clone())).flatten();
+
+    // 1 回目: 「P」をはめ込み、中の窓の手掛かりを覚える
+    let mut hz = Harness::new(pane_of(&["Q", "P"]), None, &[("Q", false)]);
+    let p = hz.add_plugin("P", "Pの中身", 1);
+    app::scan(false);
+    pump();
+    assert_eq!(key_of(p).as_deref(), Some("P"));
+    // 手掛かりが同じプラグインの窓がもう 1 枚あると、どちらか決められないので覚えない
+    let twin = hz.add_plugin("T", "同じ中身", 2);
+    let twin2 = hz.add_plugin("T2", "同じ中身", 3);
+    let store = with_app(|a| {
+        a.save();
+        a.store.clone()
+    })
+    .unwrap();
+    assert_eq!(store.fps.get("Static|Pの中身").map(String::as_str), Some("P"), "中の窓の手掛かりを覚えていない");
+    assert!(!hz.is_embedded(twin) && !hz.is_embedded(twin2));
+    assert_ok("題が変わる窓: 1 回目");
+    drop(hz);
+
+    // 2 回目（言語を変えた）: 題が「P-en」。前の起動で入った跡の灰色のタブ「P-en」が前に出ている
+    let mut root = pane_of(&["Q", "P", "P-en"]);
+    root.renumber();
+    let mut hz = Harness::new(root, Some(store.clone()), &[("Q", false)]);
+    assert_eq!(hz.active_of("Q").as_deref(), Some("P-en"));
+    let p = hz.add_plugin("P-en", "Pの中身", 1);
+    app::scan(false);
+    pump();
+    assert_eq!(key_of(p).as_deref(), Some("P"), "訳された題の窓を、中の窓の手掛かりで同じタブとして見分けられない");
+    assert!(!hz.root().contains("P-en"), "跡の灰色のタブが残っている");
+    assert_eq!(hz.active_of("Q").as_deref(), Some("P"));
+    assert!(hz.visible(p), "窓が隠れたまま");
+    assert_ok("題が変わる窓: 2 回目");
+    drop(hz);
+
+    // 3 回目: 見分けられない跡のタブ（窓の無いタブ）が前に出ている → 起動の後に、いちばん近い窓のあるタブを前に出す
+    let mut root = pane_of(&["Q", "P", "ghost"]);
+    root.renumber();
+    let mut hz = Harness::new(root, Some(store), &[("Q", false)]);
+    let p = hz.add_plugin("P", "Pの中身", 1);
+    app::scan(false);
+    pump();
+    assert_eq!(hz.active_of("Q").as_deref(), Some("ghost"));
+    assert!(!hz.visible(p), "裏のタブは隠れている（前提）");
+    app::prefer_live_tabs();
+    pump();
+    assert_eq!(hz.active_of("Q").as_deref(), Some("P"), "灰色の前のタブを、窓のあるタブに譲らせていない");
+    assert!(hz.visible(p), "窓が隠れたまま");
+    assert!(hz.root().contains("ghost"), "見分けられないタブは消さない（灰色のまま残す）");
+    // 前のタブに窓があれば何もしない
+    app::prefer_live_tabs();
+    pump();
+    assert_eq!(hz.active_of("Q").as_deref(), Some("P"));
+    assert_ok("題が変わる窓: 3 回目");
+}
+
 fn s_float_and_switch() {
     let hz = Harness::new(base_layout(), None, &BASE);
     // 別窓を開き、B を移す
@@ -696,6 +805,7 @@ fn win_harness_all() {
     s_splitter_and_maximize();
     s_host_actions();
     s_close_cancel_and_restart();
+    s_renamed_plugin_window();
     s_float_and_switch();
     s_load();
 }

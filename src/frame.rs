@@ -365,6 +365,12 @@ unsafe fn frame_proc_inner(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         WM_TIMER if wp.0 == app::TIMER_UNCLOAK => {
             let _ = KillTimer(Some(hwnd), app::TIMER_UNCLOAK);
             app::scan(true);
+            let _ = SetTimer(Some(hwnd), app::TIMER_LIVE_TABS, app::LIVE_TABS_AFTER_MS, None);
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == app::TIMER_LIVE_TABS => {
+            let _ = KillTimer(Some(hwnd), app::TIMER_LIVE_TABS);
+            app::prefer_live_tabs();
             LRESULT(0)
         }
         app::WM_APP_SCAN => {

@@ -512,7 +512,7 @@ checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
 
 [[package]]
 name = "split-layout-h"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "aviutl2",
  "serde",

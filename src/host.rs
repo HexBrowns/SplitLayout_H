@@ -41,6 +41,8 @@ pub struct Embedded {
     pub key: String,
     /// はめ込んでいる枠
     pub frame: isize,
+    /// 中の窓の手掛かり（`fingerprint`。プラグインの窓だけ）
+    pub fp: Option<String>,
     style: isize,
     owner: isize,
     rect: RECT,
@@ -154,6 +156,23 @@ fn has_child(hwnd: HWND) -> bool {
     unsafe { GetWindow(hwnd, GW_CHILD).is_ok_and(|c| !c.0.is_null()) }
 }
 
+/// プラグインの窓の、中の窓（`register_window_client` した窓）の手掛かり「クラス|題」。
+/// 本体は分離の窓の題を言語ファイルで訳すが、中の窓のクラスと題は変わらない（`ident` の 2）。
+/// 子が無い・中の窓に題が無い（クラスだけでは同じものが多い）なら None
+///
+/// 中の窓はプラグインのスレッドの窓のことがある（aviutl2-eframe）。題は `InternalGetWindowText` で読み、窓へメッセージを送らない
+/// （WinEvent の中、本体の処理の途中からも呼ぶので、よそのスレッドを待たない）
+pub fn fingerprint(hwnd: HWND) -> Option<String> {
+    let child = unsafe { GetWindow(hwnd, GW_CHILD).ok().filter(|c| !c.0.is_null())? };
+    let mut buf = [0u16; 256];
+    let n = unsafe { InternalGetWindowText(child, &mut buf) };
+    let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+    if title.is_empty() {
+        return None;
+    }
+    Some(format!("{}|{}", class_of(child), title))
+}
+
 /// 見分けるための窓の情報（題・子の有無・位置）
 pub fn describe(hwnd: HWND) -> crate::ident::Win {
     let mut r = RECT::default();
@@ -164,6 +183,7 @@ pub fn describe(hwnd: HWND) -> crate::ident::Win {
         id: raw(hwnd),
         title: title_of(hwnd),
         child: has_child(hwnd),
+        fp: fingerprint(hwnd),
         rect: [r.left, r.top, r.right - r.left, r.bottom - r.top],
     }
 }
@@ -309,6 +329,7 @@ pub fn embed(hwnd: HWND, frame: HWND, key: String) -> Option<Embedded> {
         let owner = GetWindow(hwnd, GW_OWNER).map(raw).unwrap_or(0);
         let mut rect = RECT::default();
         let _ = GetWindowRect(hwnd, &mut rect);
+        let fp = fingerprint(hwnd);
         let strip = (WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0 as isize;
         let child = (style & !strip) | (WS_CHILD | WS_CLIPSIBLINGS).0 as isize;
         // クロークは最上位のうちに解く（子になってからでは解けず、入力が届かなくなる）。
@@ -347,7 +368,7 @@ pub fn embed(hwnd: HWND, frame: HWND, key: String) -> Option<Embedded> {
             return None;
         }
         let _ = SetWindowSubclass(hwnd, Some(panel_proc), PANEL_SUBCLASS, 0);
-        Some(Embedded { hwnd: raw(hwnd), key, frame: raw(frame), style, owner, rect })
+        Some(Embedded { hwnd: raw(hwnd), key, frame: raw(frame), fp, style, owner, rect })
     }
 }
 

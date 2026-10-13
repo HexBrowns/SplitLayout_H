@@ -1,6 +1,6 @@
 [package]
 name = "split-layout-h"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 license = "MIT"
 authors = ["HexBrowns"]
@@ -9,7 +9,7 @@ publish = false
 
 [lib]
 name = "split_layout_h"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]  # rlib は tests/ の偽の本体のテストから呼ぶため
 
 [dependencies]
 aviutl2 = { version = "0.48", features = ["generic"] }

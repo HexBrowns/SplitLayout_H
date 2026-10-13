@@ -32,6 +32,9 @@ pub const TIMER_RESUME: usize = 1;
 /// 起動から少し経っても、はめ込めずに隠したままの窓があれば出す
 pub const TIMER_UNCLOAK: usize = 2;
 pub const UNCLOAK_AFTER_MS: u32 = 5000;
+/// 起動の後、灰色の前のタブを、窓のあるタブに譲らせる（`prefer_live_tabs`）。はめ込みが済んでから（見回りの後）にする
+pub const TIMER_LIVE_TABS: usize = 3;
+pub const LIVE_TABS_AFTER_MS: u32 = 3000;
 
 /// 隠れたタブ・最大化で隠れた区画の窓を置く場所（加えて `SW_HIDE` で隠す。`host::set_shown`）
 const OFFSCREEN: i32 = -32000;
@@ -191,14 +194,99 @@ fn resolve_keys(app: &App, wins: &[crate::ident::Win], scenes: &[String]) -> Vec
         layout_keys: &layout_keys,
         embedded_keys: &embedded_keys,
         rects: &app.store.rects,
+        fps: &app.store.fps,
     };
     crate::ident::resolve(wins, &known)
 }
 
-/// はめ込んだことを覚える（鍵と、次の起動で見分けるための位置）
+/// はめ込んだことを覚える（鍵と、次の起動で見分けるための位置と、プラグインの窓なら中の窓の手掛かり）。
+/// 手掛かりが同じ窓をほかにもはめ込んでいれば、どちらの鍵か決められないので覚えない（覚えていたものも消す）
 fn remember(app: &mut App, e: &Embedded) {
     app.seen.insert(e.hwnd, e.key.clone());
     app.store.rects.insert(e.key.clone(), e.top_rect());
+    if let Some(fp) = &e.fp {
+        let shared = app.embedded.values().any(|o| o.hwnd != e.hwnd && o.fp.as_deref() == Some(fp.as_str()));
+        if shared {
+            app.store.fps.remove(fp);
+        } else {
+            app.store.fps.insert(fp.clone(), e.key.clone());
+        }
+    }
+}
+
+/// はめ込んだ窓の今の題が、別の灰色のタブとして配置に残っていれば外す（`ident::duplicate_tab`）。
+/// `new` は今はめ込んだ窓。窓の題はここで読む（状態を借りる前に）。外したら真
+fn drop_duplicate_tabs(new: &[isize]) -> bool {
+    if new.is_empty() {
+        return false;
+    }
+    let embedded: Vec<isize> = with_app(|app| app.embedded.keys().copied().collect()).unwrap_or_default();
+    let floating: Vec<HWND> = main_window().map(host::enum_panel_windows).unwrap_or_default();
+    let mut titles: Vec<(isize, String)> = embedded.iter().map(|w| (*w, host::title_of(h(*w)))).collect();
+    titles.extend(floating.iter().map(|w| (raw(*w), host::title_of(*w))));
+    with_app(|app| {
+        let mut removed = false;
+        for &w in new {
+            let Some(key) = app.embedded.get(&w).map(|e| e.key.clone()) else { continue };
+            let Some(title) = titles.iter().find(|(id, _)| *id == w).map(|(_, t)| t.clone()) else { continue };
+            let others: Vec<String> = titles.iter().filter(|(id, _)| *id != w).map(|(_, t)| t.clone()).collect();
+            let embedded_keys: std::collections::HashSet<String> = app.embedded.values().map(|e| e.key.clone()).collect();
+            if let Some(dup) = crate::ident::duplicate_tab(&title, &key, &app.all_keys(), &embedded_keys, &others) {
+                app.remove_key_everywhere(&dup);
+                tracing::info!("「{key}」と同じ窓の灰色のタブ「{dup}」を外した（窓の題が変わって別のタブになっていた）");
+                removed = true;
+            }
+        }
+        if removed {
+            app.save();
+        }
+        removed
+    })
+    .unwrap_or(false)
+}
+
+/// 起動の後に 1 回だけ: 前のタブに窓が無く（灰色）、同じ区画のほかのタブに窓があれば、そちらを前に出す。
+/// 窓を見分けられなかったとき（題が変わった・本体が窓を作らなかった）に、灰色のタブが前に出たまま、
+/// はめ込んだ窓が裏に回って見えなくなるのを防ぐ（2026-10-13 に本番で起きた）。起動の後に限るのは、
+/// 使っている間に灰色のタブを選ぶ（灰色のタブとして窓を入れる。`ident::placeholder_to_fill`）のを妨げないため
+pub fn prefer_live_tabs() {
+    // 本体の窓がまだ出ていなければ（起動の途中）、はめ込みも済んでいないので待つ
+    if !main_window().is_some_and(|m| unsafe { IsWindowVisible(m).as_bool() }) {
+        unsafe {
+            let _ = SetTimer(Some(main_frame()), TIMER_LIVE_TABS, LIVE_TABS_AFTER_MS, None);
+        }
+        return;
+    }
+    let changed: Vec<isize> = with_app(|app| {
+        let live: std::collections::HashSet<String> = app.embedded.values().map(|e| e.key.clone()).collect();
+        let mut changed = Vec::new();
+        for f in &mut app.frames {
+            let moves: Vec<(u64, usize, String, String)> = f
+                .root
+                .panes()
+                .iter()
+                .filter_map(|p| {
+                    let i = crate::ident::live_tab_instead(&p.tabs, p.active, &live)?;
+                    Some((p.id, i, p.active_title().unwrap_or_default().to_string(), p.tabs[i].clone()))
+                })
+                .collect();
+            for (pane, i, from, to) in &moves {
+                f.root.set_active(*pane, *i);
+                tracing::info!("前のタブ「{from}」に窓が無いので、同じ区画の「{to}」を前に出した");
+            }
+            if !moves.is_empty() {
+                changed.push(f.hwnd);
+            }
+        }
+        if !changed.is_empty() {
+            app.save();
+        }
+        changed
+    })
+    .unwrap_or_default();
+    for f in changed {
+        relayout(h(f));
+    }
 }
 
 // ---- 他の所から呼ばれる入口（メッセージで UI スレッドの後回しにする） ----
@@ -296,7 +384,9 @@ pub fn wants_window(hwnd: HWND, has_child: bool, title: &str) -> bool {
         if !host::is_panel_window(hwnd, main) {
             return false;
         }
-        app.frame_of_key(title).is_some() || (!has_child && app.frame_of_key(host::SCENE_PREVIEW).is_some())
+        let by_fp = has_child
+            && host::fingerprint(hwnd).and_then(|fp| app.store.fps.get(&fp).cloned()).is_some_and(|k| app.frame_of_key(&k).is_some());
+        by_fp || app.frame_of_key(title).is_some() || (!has_child && app.frame_of_key(host::SCENE_PREVIEW).is_some())
     })
     .unwrap_or(false)
 }
@@ -345,9 +435,11 @@ pub fn scan(force_uncloak: bool) {
         }
     }
     let mut touched: Vec<HWND> = Vec::new();
+    let mut new: Vec<isize> = Vec::new();
     for (w, frame, key) in plan {
         if let Some(e) = host::embed(w, frame, key) {
             tracing::info!("はめ込んだ: {}", e.key);
+            new.push(e.hwnd);
             with_app(|app| {
                 remember(app, &e);
                 app.embedded.insert(e.hwnd, e);
@@ -357,8 +449,13 @@ pub fn scan(force_uncloak: bool) {
             }
         }
     }
-    for f in touched {
-        relayout(f);
+    if drop_duplicate_tabs(&new) {
+        // 外したタブは、ほかの枠にあったかもしれない
+        relayout_all();
+    } else {
+        for f in touched {
+            relayout(f);
+        }
     }
     // はめ込まなかった窓のクロークを解く（閉じかけている間は隠したまま）
     if !suspended {
@@ -571,10 +668,12 @@ pub fn add_window(window: HWND, frame: HWND, target: Target, dock: Dock) {
     let Some(key) = key else { return };
     host::hook_float(window);
     if let Some(e) = host::embed(window, frame, key) {
+        let hwnd = e.hwnd;
         with_app(|app| {
             remember(app, &e);
             app.embedded.insert(e.hwnd, e);
         });
+        drop_duplicate_tabs(&[hwnd]);
     }
     with_app(|app| app.save());
     relayout_all();
